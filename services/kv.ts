@@ -1,5 +1,5 @@
 
-import { FeedbackEntry, AppSettings, ChatSession, PlatformFeedback, User } from '../types';
+import { FeedbackEntry, AppSettings, ChatSession, PlatformFeedback, User, DirectChat } from '../types';
 import { TeamMember } from '../data/teamData';
 
 // Keys for Redis
@@ -10,6 +10,7 @@ const KEY_CHAT_LOGS = 'med_russia:chat_logs';
 const KEY_ADMINS = 'admin.json';
 const KEY_PLATFORM_FEEDBACK = 'med_russia:platform_feedback';
 const KEY_TEAM = 'med_russia:team';
+const KEY_DIRECT_CHATS = 'med_russia:direct_chats';
 
 // Helper to interact with Vercel Serverless Function proxy
 const upstashFetch = async (command: string, ...args: any[]) => {
@@ -273,6 +274,26 @@ export const fetchTeamFromUpstash = async (): Promise<TeamMember[]> => {
 export const saveTeamToUpstash = async (team: TeamMember[]): Promise<boolean> => {
     try {
         await setJSON(KEY_TEAM, team);
+        return true;
+    } catch (e) {
+        return false;
+    }
+};
+
+// --- DIRECT CHATS ---
+
+export const fetchDirectChatsFromUpstash = async (): Promise<DirectChat[]> => {
+    try {
+        const chats = await getJSON<DirectChat[]>(KEY_DIRECT_CHATS, []);
+        return Array.isArray(chats) ? chats : [];
+    } catch (e) {
+        return [];
+    }
+};
+
+export const saveDirectChatsToUpstash = async (chats: DirectChat[]): Promise<boolean> => {
+    try {
+        await setJSON(KEY_DIRECT_CHATS, chats);
         return true;
     } catch (e) {
         return false;

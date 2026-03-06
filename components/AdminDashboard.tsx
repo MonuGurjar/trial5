@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FeedbackEntry, AIAnalysis, User, AppSettings, AdminRole, ChatSession, PlatformFeedback, FeatureFlags } from '../types';
+import { FeedbackEntry, AIAnalysis, User, AppSettings, AdminRole, ChatSession, PlatformFeedback, FeatureFlags, DirectChat, DirectMessage, DirectMessageAttachment, DocumentMetadata } from '../types';
 import { analyzeFeedback, generateSmartReply, analyzeChatHistory, generateStudentRecommendation, generateEmailDraft } from '../services/gemini';
 import { addReply, registerUser, getAllAdmins, getAllStudents, deleteFeedback, deleteUser, updateUser, getChatHistory, getAllPlatformFeedback, updatePlatformFeedbackStatus, getUserFeedback, sendNotificationToUser, verifyUserDocument, removeUserDocument, saveChatSessionToUpstash, getTeamMembers, saveTeamMembers } from '../services/db';
 import { TeamMember } from '../data/teamData';
+import { getAllDirectChats, sendDirectMessage, escalateChat, closeDirectChat } from '../services/directChat';
+
 import { deleteFileFromCloudinary } from '../services/storage';
 import { getSettings, saveSettings } from '../services/settings';
 import { sendReplyNotification, sendTestEmail, sendDirectEmail } from '../services/email';
@@ -13,7 +15,7 @@ import {
     LayoutDashboard, Users, Shield, Sparkles, Settings, LogOut, Menu,
     ExternalLink, Sun, Moon, Search, Trash2, MessageCircle, Edit3, Save,
     ToggleLeft, Key, Palette, Cpu, Globe, Database, BrainCircuit, Lightbulb, MessageSquare,
-    MessageSquarePlus, CheckCircle, Bell, Send, ArrowLeft, FileText, Activity, User as UserIcon, Mail, Smartphone, Wand2, XCircle, ToggleRight, List, AlertTriangle, Lightbulb as IdeaIcon, Camera, X, Plus
+    MessageSquarePlus, CheckCircle, Bell, Send, ArrowLeft, FileText, Activity, User as UserIcon, Mail, Smartphone, Wand2, XCircle, ToggleRight, List, AlertTriangle, Lightbulb as IdeaIcon, Camera, X, Plus, Upload
 } from 'lucide-react';
 
 interface AdminDashboardProps {
@@ -26,13 +28,14 @@ interface AdminDashboardProps {
     toggleTheme: () => void;
 }
 
-type Tab = 'inquiries' | 'students' | 'admins' | 'insights' | 'settings' | 'chats' | 'chat_insights' | 'feedback_hub';
+type Tab = 'inquiries' | 'students' | 'admins' | 'insights' | 'settings' | 'chats' | 'chat_insights' | 'feedback_hub' | 'direct_chats';
 
 const PERMISSIONS: Record<AdminRole, Tab[]> = {
-    'super_admin': ['inquiries', 'students', 'admins', 'insights', 'chats', 'chat_insights', 'feedback_hub', 'settings'],
-    'manager': ['inquiries', 'students', 'admins', 'insights', 'chats', 'chat_insights', 'feedback_hub', 'settings'],
+    'super_admin': ['inquiries', 'students', 'admins', 'insights', 'chats', 'chat_insights', 'direct_chats', 'feedback_hub', 'settings'],
+    'manager': ['inquiries', 'students', 'admins', 'insights', 'chats', 'chat_insights', 'direct_chats', 'feedback_hub', 'settings'],
+    'chat_officer': ['inquiries', 'admins', 'direct_chats'],
     'editor': ['admins', 'settings'],
-    'support': ['inquiries', 'students', 'admins', 'chats']
+    'support': ['inquiries', 'students', 'admins', 'chats', 'direct_chats']
 };
 
 const COLORS = ['#10b981', '#64748b', '#ef4444', '#f59e0b']; // Emerald, Slate, Red, Amber
@@ -105,6 +108,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
     const [editingTeamCard, setEditingTeamCard] = useState<TeamMember | null>(null);
     const [isSavingTeamCard, setIsSavingTeamCard] = useState(false);
 
+    // Direct Chat State
+    const [directChats, setDirectChats] = useState<DirectChat[]>([]);
+    const [activeDirectChat, setActiveDirectChat] = useState<DirectChat | null>(null);
+    const [directChatMsg, setDirectChatMsg] = useState('');
+    const [directChatAttachment, setDirectChatAttachment] = useState<DirectMessageAttachment | null>(null);
+    const [isSendingDirect, setIsSendingDirect] = useState(false);
+    const [escalateReason, setEscalateReason] = useState('');
+    const [showEscalateModal, setShowEscalateModal] = useState(false);
+    const [isFetchingDirectChats, setIsFetchingDirectChats] = useState(false);
+
     const [studentView, setStudentView] = useState<'grid' | 'list'>('grid');
     const [studentSort, setStudentSort] = useState<'name' | 'email'>('name');
 
@@ -150,6 +163,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
                 getAllPlatformFeedback().then(data => {
                     setPlatformFeedback(Array.isArray(data) ? data : []);
                 }).catch(console.error).finally(() => setIsFetchingFeedback(false));
+            }
+
+            if (activeTab === 'direct_chats') {
+                setIsFetchingDirectChats(true);
+                getAllDirectChats().then(data => {
+                    setDirectChats(data);
+                    // Select first chat if none selected
+                    if (data.length > 0 && !activeDirectChat) setActiveDirectChat(data[0]);
+                }).catch(console.error).finally(() => setIsFetchingDirectChats(false));
             }
         };
 
@@ -212,7 +234,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
         studentInquiries.forEach(inq => activity.push({ type: 'inquiry', label: `Inquiry: ${inq.targetUniversity}`, date: inq.timestamp, desc: inq.message }));
         studentChats.forEach(chat => activity.push({ type: 'chat', label: `Chat Session (${chat.messageCount} msgs)`, date: chat.startTime, desc: chat.messages[0]?.text || 'Started chat' }));
         if (viewingStudent.documents) {
-            Object.entries(viewingStudent.documents).forEach(([key, doc]) => activity.push({ type: 'doc', label: `Uploaded ${key.toUpperCase()}`, date: doc.uploadedAt, desc: `Status: ${doc.status}` }));
+            Object.entries(viewingStudent.documents).forEach(([key, doc]) => { const d = doc as DocumentMetadata; activity.push({ type: 'doc', label: `Uploaded ${key.toUpperCase()}`, date: d.uploadedAt, desc: `Status: ${d.status}` }); });
         }
         return activity.sort((a, b) => b.date - a.date);
     };
@@ -319,6 +341,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
 
     const getMyTeamCard = (): TeamMember | undefined => {
         return teamMembers.find(m => m.linkedEmail === currentUser.email);
+    };
+
+    // Direct Chat Handlers
+    const handleSendDirectMsg = async () => {
+        if (!activeDirectChat || (!directChatMsg.trim() && !directChatAttachment)) return;
+        setIsSendingDirect(true);
+        try {
+            const updated = await sendDirectMessage(
+                activeDirectChat.id, currentUser.id, currentUser.name, 'admin',
+                directChatMsg.trim(), directChatAttachment || undefined
+            );
+            if (updated) {
+                setDirectChats(prev => prev.map(c => c.id === updated.id ? updated : c));
+                setActiveDirectChat(updated);
+            }
+            setDirectChatMsg('');
+            setDirectChatAttachment(null);
+        } catch (e) { alert('Failed to send'); }
+        finally { setIsSendingDirect(false); }
+    };
+
+    const handleDirectChatFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        if (file.size > 5 * 1024 * 1024) { alert('Max 5MB'); return; }
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            setDirectChatAttachment({ name: file.name, type: file.type, data: reader.result as string });
+        };
+        reader.readAsDataURL(file);
+    };
+
+    const handleEscalateChat = async () => {
+        if (!activeDirectChat || !escalateReason.trim()) return;
+        const updated = await escalateChat(activeDirectChat.id, currentUser.id, currentUser.name, 'manager', escalateReason);
+        if (updated) {
+            setDirectChats(prev => prev.map(c => c.id === updated.id ? updated : c));
+            setActiveDirectChat(updated);
+        }
+        setEscalateReason('');
+        setShowEscalateModal(false);
+    };
+
+    const handleCloseDirectChat = async (chatId: string) => {
+        await closeDirectChat(chatId);
+        setDirectChats(prev => prev.map(c => c.id === chatId ? { ...c, status: 'closed' as const } : c));
+        if (activeDirectChat?.id === chatId) setActiveDirectChat(prev => prev ? { ...prev, status: 'closed' as const } : null);
     };
     const handleSaveSettings = async () => { if (settings) { setIsSavingSettings(true); await saveSettings(settings); setIsSavingSettings(false); alert("Saved"); } };
     const handleSendReply = async () => {
@@ -569,7 +638,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
 
     const filteredNavItems = [
         { id: 'inquiries', label: 'Inquiries', icon: <LayoutDashboard size={20} /> },
-        { id: 'chats', label: 'Chats', icon: <MessageSquare size={20} /> },
+        { id: 'direct_chats', label: 'Direct Chats', icon: <MessageCircle size={20} /> },
+        { id: 'chats', label: 'AI Chats', icon: <MessageSquare size={20} /> },
         { id: 'students', label: 'Students', icon: <Users size={20} /> },
         { id: 'admins', label: 'Team', icon: <Shield size={20} /> },
         { id: 'insights', label: 'Insights', icon: <Sparkles size={20} /> },
@@ -905,8 +975,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
                             })()}
                         </section>
 
-                        {/* Admin Management — super_admin only */}
-                        {currentUser.adminRole === 'super_admin' && (
+                        {/* Admin Management — super_admin and manager only */}
+                        {(currentUser.adminRole === 'super_admin' || currentUser.adminRole === 'manager') && (
                             <div className="grid lg:grid-cols-3 gap-8">
                                 <div className="lg:col-span-1">
                                     <div className="bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-slate-200 dark:border-slate-700 shadow-sm sticky top-8">
@@ -918,9 +988,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
                                             <div>
                                                 <label className="text-xs font-bold text-slate-400 uppercase mb-2 block ml-1">Role</label>
                                                 <div className="grid grid-cols-2 gap-2">
-                                                    {['super_admin', 'manager', 'editor', 'support'].map(role => (
-                                                        <button key={role} onClick={() => setNewAdminRole(role as AdminRole)} className={`py-2 rounded-lg text-xs font-bold uppercase border transition-all ${newAdminRole === role ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-transparent text-slate-500 border-slate-200 dark:border-slate-700 hover:border-indigo-400'}`}>{role.replace('_', ' ')}</button>
-                                                    ))}
+                                                    {(['super_admin', 'manager', 'chat_officer', 'editor', 'support'] as const)
+                                                        .filter(role => currentUser.adminRole === 'super_admin' || role !== 'super_admin')
+                                                        .map(role => (
+                                                            <button key={role} onClick={() => setNewAdminRole(role as AdminRole)} className={`py-2 rounded-lg text-xs font-bold uppercase border transition-all ${newAdminRole === role ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-transparent text-slate-500 border-slate-200 dark:border-slate-700 hover:border-indigo-400'}`}>{role.replace('_', ' ')}</button>
+                                                        ))}
                                                 </div>
                                             </div>
                                             <button onClick={handleCreateAdmin} disabled={isCreatingAdmin || !newAdminName || !newAdminEmail || !newAdminPass} className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl hover:bg-indigo-700 transition-all shadow-lg disabled:opacity-50">{isCreatingAdmin ? 'Creating...' : 'Register Admin'}</button>
@@ -930,26 +1002,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
                                 <div className="lg:col-span-2 space-y-4">
                                     <h3 className="text-xl font-black text-slate-900 dark:text-white">Current Team</h3>
                                     <div className="grid sm:grid-cols-2 gap-4">
-                                        {admins.map(admin => (
-                                            <div key={admin.id} className="flex flex-col p-4 bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm relative group">
-                                                <div className="flex items-center gap-4 mb-3">
-                                                    <div className="w-12 h-12 bg-indigo-100 dark:bg-indigo-900/30 rounded-xl flex items-center justify-center text-indigo-600 dark:text-indigo-400 font-bold text-lg overflow-hidden">
-                                                        {admin.avatar ? <img src={admin.avatar} className="w-full h-full object-cover" alt="" /> : admin.name.charAt(0)}
+                                        {admins
+                                            .filter(admin => {
+                                                // super_admin sees everyone
+                                                if (currentUser.adminRole === 'super_admin') return true;
+                                                // manager doesn't see super_admins
+                                                if (currentUser.adminRole === 'manager') return admin.adminRole !== 'super_admin';
+                                                return false;
+                                            })
+                                            .map(admin => {
+                                                const canEdit = currentUser.adminRole === 'super_admin' ||
+                                                    (currentUser.adminRole === 'manager' && admin.adminRole !== 'super_admin' && admin.adminRole !== 'manager');
+                                                return (
+                                                    <div key={admin.id} className="flex flex-col p-4 bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm relative group">
+                                                        <div className="flex items-center gap-4 mb-3">
+                                                            <div className="w-12 h-12 bg-indigo-100 dark:bg-indigo-900/30 rounded-xl flex items-center justify-center text-indigo-600 dark:text-indigo-400 font-bold text-lg overflow-hidden">
+                                                                {admin.avatar ? <img src={admin.avatar} className="w-full h-full object-cover" alt="" /> : admin.name.charAt(0)}
+                                                            </div>
+                                                            <div>
+                                                                <h4 className="font-bold text-slate-900 dark:text-white">{admin.name}</h4>
+                                                                <span className="text-[10px] uppercase font-bold bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded text-slate-500">{admin.adminRole?.replace('_', ' ')}</span>
+                                                            </div>
+                                                        </div>
+                                                        <div className="text-xs text-slate-500 break-all mb-4">{admin.email}</div>
+                                                        {(canEdit && currentUser.id !== admin.id) && (
+                                                            <div className="flex gap-2 mt-auto">
+                                                                <button onClick={() => setEditingAdmin(admin)} className="flex-1 py-1.5 bg-slate-50 dark:bg-slate-700 rounded-lg text-xs font-bold hover:bg-indigo-50 hover:text-indigo-600 transition-colors">Edit</button>
+                                                                <button onClick={() => handleDeleteUser(admin.email)} className="flex-1 py-1.5 bg-red-50 dark:bg-red-900/10 rounded-lg text-xs font-bold text-red-500 hover:bg-red-100 transition-colors">Remove</button>
+                                                            </div>
+                                                        )}
                                                     </div>
-                                                    <div>
-                                                        <h4 className="font-bold text-slate-900 dark:text-white">{admin.name}</h4>
-                                                        <span className="text-[10px] uppercase font-bold bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded text-slate-500">{admin.adminRole?.replace('_', ' ')}</span>
-                                                    </div>
-                                                </div>
-                                                <div className="text-xs text-slate-500 break-all mb-4">{admin.email}</div>
-                                                {(currentUser.adminRole === 'super_admin' && currentUser.id !== admin.id) && (
-                                                    <div className="flex gap-2 mt-auto">
-                                                        <button onClick={() => setEditingAdmin(admin)} className="flex-1 py-1.5 bg-slate-50 dark:bg-slate-700 rounded-lg text-xs font-bold hover:bg-indigo-50 hover:text-indigo-600 transition-colors">Edit</button>
-                                                        <button onClick={() => handleDeleteUser(admin.email)} className="flex-1 py-1.5 bg-red-50 dark:bg-red-900/10 rounded-lg text-xs font-bold text-red-500 hover:bg-red-100 transition-colors">Remove</button>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
+                                                );
+                                            })}
                                     </div>
                                 </div>
                             </div>
@@ -959,7 +1043,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
                         <section className="bg-white dark:bg-slate-800 p-6 rounded-[2rem] border border-slate-200 dark:border-slate-700 shadow-sm">
                             <div className="flex items-center justify-between mb-6">
                                 <h3 className="text-xl font-black text-slate-900 dark:text-white flex items-center gap-2"><Users size={20} /> Team Cards (Public Display)</h3>
-                                {currentUser.adminRole === 'super_admin' && (
+                                {(currentUser.adminRole === 'super_admin' || currentUser.adminRole === 'manager') && (
                                     <button onClick={() => setEditingTeamCard({
                                         id: Math.random().toString(36).substr(2, 9),
                                         name: '', role: '', bio: '', emoji: '👤', specialization: '', isFeatured: false
@@ -970,7 +1054,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
                             </div>
                             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
                                 {teamMembers.map(member => {
-                                    const canEdit = currentUser.adminRole === 'super_admin' || member.linkedEmail === currentUser.email;
+                                    const canEdit = currentUser.adminRole === 'super_admin' ||
+                                        currentUser.adminRole === 'manager' ||
+                                        member.linkedEmail === currentUser.email;
                                     return (
                                         <div key={member.id} className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-slate-100 dark:border-slate-700 relative group">
                                             <div className="flex items-center gap-3 mb-3">
@@ -995,7 +1081,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
                                                             <Edit3 size={14} />
                                                         </button>
                                                     )}
-                                                    {currentUser.adminRole === 'super_admin' && (
+                                                    {(currentUser.adminRole === 'super_admin' || currentUser.adminRole === 'manager') && (
                                                         <button onClick={() => handleDeleteTeamCard(member.id)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors" title="Delete">
                                                             <Trash2 size={14} />
                                                         </button>
@@ -1027,7 +1113,154 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ feedbackList: in
                     </div>
                 )}
 
-                {/* CHATS TAB */}
+                {/* DIRECT CHATS TAB */}
+                {activeTab === 'direct_chats' && (
+                    <div className="grid lg:grid-cols-3 gap-6 h-[calc(100vh-12rem)]">
+                        {/* Chat List Sidebar */}
+                        <div className="bg-white dark:bg-slate-800 rounded-[2rem] border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col">
+                            <div className="p-4 border-b border-slate-100 dark:border-slate-700 flex justify-between items-center">
+                                <h3 className="font-black text-slate-900 dark:text-white">Student Chats</h3>
+                                {isFetchingDirectChats && <span className="text-[10px] bg-slate-100 dark:bg-slate-700 px-2 py-1 rounded text-slate-500 animate-pulse">Syncing...</span>}
+                            </div>
+                            <div className="flex-1 overflow-y-auto custom-scrollbar">
+                                {directChats.length === 0 ? (
+                                    <div className="text-center py-16 text-slate-400 text-xs">No conversations yet.<br />Students can start chats from their dashboard.</div>
+                                ) : directChats.map(chat => (
+                                    <div key={chat.id} onClick={() => setActiveDirectChat(chat)} className={`p-4 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all hover:bg-slate-50 dark:hover:bg-slate-900/50 ${activeDirectChat?.id === chat.id ? 'bg-indigo-50 dark:bg-indigo-900/20 border-l-4 border-l-indigo-500' : ''}`}>
+                                        <div className="flex items-center justify-between mb-1">
+                                            <div className="flex items-center gap-2">
+                                                <div className="w-8 h-8 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center text-xs font-bold text-indigo-600 dark:text-indigo-400">{chat.studentName.charAt(0)}</div>
+                                                <h4 className="font-bold text-sm text-slate-900 dark:text-white truncate max-w-[120px]">{chat.studentName}</h4>
+                                            </div>
+                                            <div className="flex items-center gap-1">
+                                                {chat.status === 'escalated' && <span className="text-[9px] bg-amber-100 dark:bg-amber-900/30 text-amber-600 px-1.5 py-0.5 rounded font-bold">⚠️</span>}
+                                                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${chat.status === 'open' ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600' : chat.status === 'escalated' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600' : 'bg-slate-100 dark:bg-slate-700 text-slate-500'}`}>{chat.status}</span>
+                                            </div>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500 truncate mt-1">{chat.messages[chat.messages.length - 1]?.text || 'No messages'}</p>
+                                        <p className="text-[9px] text-slate-400 mt-1">{new Date(chat.lastMessageAt).toLocaleDateString()} · {chat.messages.length} msgs</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Active Chat View */}
+                        <div className="lg:col-span-2 bg-white dark:bg-slate-800 rounded-[2rem] border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col">
+                            {activeDirectChat ? (
+                                <>
+                                    {/* Chat Header */}
+                                    <div className="p-4 border-b border-slate-100 dark:border-slate-700 flex justify-between items-center">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center text-sm font-bold text-indigo-600">{activeDirectChat.studentName.charAt(0)}</div>
+                                            <div>
+                                                <h4 className="font-bold text-slate-900 dark:text-white">{activeDirectChat.studentName}</h4>
+                                                <p className="text-[10px] text-slate-500">{activeDirectChat.studentEmail}</p>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {(currentUser.adminRole === 'chat_officer' || currentUser.adminRole === 'support') && activeDirectChat.status !== 'closed' && (
+                                                <button onClick={() => setShowEscalateModal(true)} className="px-3 py-1.5 bg-amber-50 dark:bg-amber-900/20 text-amber-600 rounded-xl text-xs font-bold hover:bg-amber-100 transition-colors flex items-center gap-1">⚠️ Escalate</button>
+                                            )}
+                                            {(currentUser.adminRole === 'super_admin' || currentUser.adminRole === 'manager') && activeDirectChat.status !== 'closed' && (
+                                                <button onClick={() => handleCloseDirectChat(activeDirectChat.id)} className="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold hover:bg-red-50 hover:text-red-600 transition-colors">Close Chat</button>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Escalation Banner */}
+                                    {activeDirectChat.status === 'escalated' && (
+                                        <div className="px-4 py-2 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-100 dark:border-amber-800 flex items-center gap-2 text-xs text-amber-700 dark:text-amber-400 font-bold">
+                                            ⚠️ Escalated to {activeDirectChat.escalatedTo} — {activeDirectChat.escalationReason}
+                                        </div>
+                                    )}
+                                    {activeDirectChat.status === 'closed' && (
+                                        <div className="px-4 py-2 bg-slate-50 dark:bg-slate-900/30 border-b border-slate-100 dark:border-slate-700 text-center text-xs text-slate-500 font-bold">This conversation has been closed.</div>
+                                    )}
+
+                                    {/* Messages */}
+                                    <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                                        {activeDirectChat.messages.map(msg => (
+                                            <div key={msg.id} className={`flex ${msg.senderRole === 'admin' ? 'justify-end' : 'justify-start'}`}>
+                                                <div className={`max-w-[75%] p-3 rounded-2xl ${msg.isEscalation ? 'bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800' : msg.senderRole === 'admin' ? 'bg-indigo-600 text-white rounded-br-md' : 'bg-slate-100 dark:bg-slate-700 rounded-bl-md'}`}>
+                                                    <p className={`text-[10px] font-bold mb-1 ${msg.senderRole === 'admin' && !msg.isEscalation ? 'text-indigo-200' : 'text-slate-500 dark:text-slate-400'}`}>{msg.senderName}</p>
+                                                    <p className={`text-sm ${msg.senderRole === 'admin' && !msg.isEscalation ? 'text-white' : 'text-slate-900 dark:text-white'}`}>{msg.text}</p>
+                                                    {msg.attachment && (
+                                                        <div className="mt-2">
+                                                            {msg.attachment.type.startsWith('image/') ? (
+                                                                <img src={msg.attachment.data} alt={msg.attachment.name} className="max-w-full max-h-48 rounded-lg border border-white/20" />
+                                                            ) : (
+                                                                <a href={msg.attachment.data} download={msg.attachment.name} className={`text-xs underline ${msg.senderRole === 'admin' ? 'text-indigo-200' : 'text-indigo-600'}`}>📎 {msg.attachment.name}</a>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                    <p className={`text-[9px] mt-1 ${msg.senderRole === 'admin' && !msg.isEscalation ? 'text-indigo-300' : 'text-slate-400'}`}>{new Date(msg.timestamp).toLocaleTimeString()}</p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    {/* Message Input */}
+                                    {activeDirectChat.status !== 'closed' && (
+                                        <div className="p-4 border-t border-slate-100 dark:border-slate-700">
+                                            {directChatAttachment && (
+                                                <div className="mb-2 flex items-center gap-2 p-2 bg-slate-50 dark:bg-slate-900/50 rounded-xl text-xs">
+                                                    <span className="text-slate-600 dark:text-slate-300">📎 {directChatAttachment.name}</span>
+                                                    <button onClick={() => setDirectChatAttachment(null)} className="text-red-500 hover:underline text-[10px]">Remove</button>
+                                                </div>
+                                            )}
+                                            <div className="flex items-center gap-2">
+                                                <label className="p-2.5 bg-slate-100 dark:bg-slate-700 rounded-xl cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
+                                                    <Upload size={18} className="text-slate-500" />
+                                                    <input type="file" accept="image/*,.pdf,.doc,.docx,.zip" onChange={handleDirectChatFileUpload} className="hidden" />
+                                                </label>
+                                                <input
+                                                    className="flex-1 p-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 dark:text-white"
+                                                    placeholder="Type a message..."
+                                                    value={directChatMsg}
+                                                    onChange={e => setDirectChatMsg(e.target.value)}
+                                                    onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSendDirectMsg()}
+                                                />
+                                                <button onClick={handleSendDirectMsg} disabled={isSendingDirect || (!directChatMsg.trim() && !directChatAttachment)} className="p-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all disabled:opacity-50 shadow-lg shadow-indigo-200 dark:shadow-none">
+                                                    <Send size={18} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
+                            ) : (
+                                <div className="flex-1 flex items-center justify-center text-slate-400 text-sm">
+                                    <div className="text-center">
+                                        <MessageCircle size={48} className="mx-auto mb-4 opacity-30" />
+                                        <p className="font-bold">Select a conversation</p>
+                                        <p className="text-xs mt-1">Choose a student chat from the left panel</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {/* Escalation Modal */}
+                {showEscalateModal && activeDirectChat && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                        <div className="bg-white dark:bg-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl animate-in zoom-in duration-200">
+                            <h3 className="text-lg font-black text-slate-900 dark:text-white mb-4">⚠️ Escalate Chat</h3>
+                            <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Escalating <strong>{activeDirectChat.studentName}</strong>'s chat to a Manager or Super Admin. Provide a reason below.</p>
+                            <textarea
+                                className="w-full p-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-sm outline-none focus:ring-2 focus:ring-amber-500 min-h-[80px] dark:text-white"
+                                placeholder="Reason for escalation..."
+                                value={escalateReason}
+                                onChange={e => setEscalateReason(e.target.value)}
+                            />
+                            <div className="flex gap-3 mt-6">
+                                <button onClick={() => { setShowEscalateModal(false); setEscalateReason(''); }} className="flex-1 py-3 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold rounded-xl">Cancel</button>
+                                <button onClick={handleEscalateChat} disabled={!escalateReason.trim()} className="flex-[2] py-3 bg-amber-500 text-white font-bold rounded-xl hover:bg-amber-600 disabled:opacity-50">Escalate</button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* AI CHATS TAB */}
                 {activeTab === 'chats' && (
                     <div className="grid lg:grid-cols-3 gap-6 h-[calc(100vh-12rem)]">
                         <div className="bg-white dark:bg-slate-800 rounded-[2rem] border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col">

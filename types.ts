@@ -1,6 +1,6 @@
 
 export type UserRole = 'student' | 'admin';
-export type AdminRole = 'super_admin' | 'manager' | 'editor' | 'support';
+export type AdminRole = 'super_admin' | 'manager' | 'chat_officer' | 'editor' | 'support';
 
 export interface EligibilityData {
   pcbPercentage: string;
@@ -120,6 +120,41 @@ export interface ChatSession {
   lastMessageTime: number;
   messages: ChatMessage[];
   messageCount: number;
+}
+
+// --- DIRECT MESSAGING TYPES ---
+
+export interface DirectMessageAttachment {
+  name: string;
+  type: string; // mime type
+  data: string; // base64 data URL
+}
+
+export interface DirectMessage {
+  id: string;
+  senderId: string;
+  senderName: string;
+  senderRole: 'student' | 'admin';
+  text: string;
+  attachment?: DirectMessageAttachment;
+  timestamp: number;
+  isEscalation?: boolean;
+  escalationNote?: string;
+}
+
+export interface DirectChat {
+  id: string;
+  studentId: string;
+  studentName: string;
+  studentEmail: string;
+  assignedTo?: string; // admin user id
+  assignedName?: string;
+  status: 'open' | 'escalated' | 'closed';
+  escalatedTo?: string; // role level e.g. 'manager'
+  escalationReason?: string;
+  messages: DirectMessage[];
+  createdAt: number;
+  lastMessageAt: number;
 }
 
 // --- SITE BUILDER TYPES ---
